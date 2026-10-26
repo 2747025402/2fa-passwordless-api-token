@@ -1,0 +1,82 @@
+name: Deploy to Cloudflare Workers
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - 'docs/**'
+      - '**.md'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-workers-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Build & Deploy
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+        env:
+          HUSKY: 0
+
+      - name: Sync ENCRYPTION_KEY secret
+        if: ${{ secrets.ENCRYPTION_KEY != '' }}
+        run: |
+          if ! npx wrangler secret list 2>/dev/null | grep -q '"ENCRYPTION_KEY"'; then
+            printf '%s' "$ENCRYPTION_KEY" | npx wrangler secret put ENCRYPTION_KEY
+          else
+            echo "ENCRYPTION_KEY already present, skipping"
+          fi
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          ENCRYPTION_KEY: ${{ secrets.ENCRYPTION_KEY }}
+
+      - name: Sync API_TOKEN secret
+        if: ${{ secrets.API_TOKEN != '' }}
+        run: |
+          if ! npx wrangler secret list 2>/dev/null | grep -q '"API_TOKEN"'; then
+            printf '%s' "$API_TOKEN" | npx wrangler secret put API_TOKEN
+          else
+            echo "API_TOKEN already present, skipping"
+          fi
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          API_TOKEN: ${{ secrets.API_TOKEN }}
+
+      - name: Deploy
+        run: npm run deploy:git
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
+      - name: Smoke test
+        run: |
+          for i in 1 2 3 4 5; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' "$WORKER_URL/")
+            echo "attempt $i: HTTP $code"
+            [ "$code" = "200" ] && exit 0
+            sleep 5
+          done
+          echo "Worker did not return 200" >&2
+          exit 1
+        env:
+          WORKER_URL: https://2fa.a9tfa30f.workers.dev
