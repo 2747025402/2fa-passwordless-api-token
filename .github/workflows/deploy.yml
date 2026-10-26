@@ -21,6 +21,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
+    # secrets 不能直接写进 if 条件，先落到 env 再判断
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      ENCRYPTION_KEY: ${{ secrets.ENCRYPTION_KEY }}
+      API_TOKEN: ${{ secrets.API_TOKEN }}
+      WORKER_URL: https://2fa.a9tfa30f.workers.dev
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -36,47 +44,42 @@ jobs:
         env:
           HUSKY: 0
 
-      - name: Sync ENCRYPTION_KEY secret
-        if: ${{ secrets.ENCRYPTION_KEY != '' }}
+      - name: Preflight (missing CLOUDFLARE_API_TOKEN)
+        if: env.CLOUDFLARE_API_TOKEN == ''
         run: |
-          if ! npx wrangler secret list 2>/dev/null | grep -q '"ENCRYPTION_KEY"'; then
-            printf '%s' "$ENCRYPTION_KEY" | npx wrangler secret put ENCRYPTION_KEY
-          else
-            echo "ENCRYPTION_KEY already present, skipping"
-          fi
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          ENCRYPTION_KEY: ${{ secrets.ENCRYPTION_KEY }}
+          echo "::notice title=Deploy skipped::CLOUDFLARE_API_TOKEN 未配置，跳过部署。"
+          echo "在仓库 Settings → Secrets and variables → Actions 添加 CLOUDFLARE_API_TOKEN 后，本工作流会自动部署。"
 
-      - name: Sync API_TOKEN secret
-        if: ${{ secrets.API_TOKEN != '' }}
+      - name: Sync ENCRYPTION_KEY
+        if: env.CLOUDFLARE_API_TOKEN != '' && env.ENCRYPTION_KEY != ''
         run: |
-          if ! npx wrangler secret list 2>/dev/null | grep -q '"API_TOKEN"'; then
-            printf '%s' "$API_TOKEN" | npx wrangler secret put API_TOKEN
+          if npx wrangler secret list 2>/dev/null | grep -q '"ENCRYPTION_KEY"'; then
+            echo "ENCRYPTION_KEY 已存在，跳过"
           else
-            echo "API_TOKEN already present, skipping"
+            printf '%s' "$ENCRYPTION_KEY" | npx wrangler secret put ENCRYPTION_KEY
           fi
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          API_TOKEN: ${{ secrets.API_TOKEN }}
+
+      - name: Sync API_TOKEN
+        if: env.CLOUDFLARE_API_TOKEN != '' && env.API_TOKEN != ''
+        run: |
+          if npx wrangler secret list 2>/dev/null | grep -q '"API_TOKEN"'; then
+            echo "API_TOKEN 已存在，跳过"
+          else
+            printf '%s' "$API_TOKEN" | npx wrangler secret put API_TOKEN
+          fi
 
       - name: Deploy
+        if: env.CLOUDFLARE_API_TOKEN != ''
         run: npm run deploy:git
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
 
       - name: Smoke test
+        if: env.CLOUDFLARE_API_TOKEN != ''
         run: |
-          for i in 1 2 3 4 5; do
+          for i in 1 2 3 4 5 6; do
             code=$(curl -s -o /dev/null -w '%{http_code}' "$WORKER_URL/")
             echo "attempt $i: HTTP $code"
-            [ "$code" = "200" ] && exit 0
+            if [ "$code" = "200" ]; then exit 0; fi
             sleep 5
           done
-          echo "Worker did not return 200" >&2
+          echo "Worker 未返回 200" >&2
           exit 1
-        env:
-          WORKER_URL: https://2fa.a9tfa30f.workers.dev
